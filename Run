@@ -1,0 +1,276 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Mon Nov 13 20:02:15 2017
+
+@author: LemonNation
+"""
+
+import numpy as np
+
+import os
+import keras
+from keras.models import Sequential, load_model
+from keras.layers import * #Dense, LSTM, Dropout, GRU, Conv2D, MaxPooling2D, Flatten, merge, Merge, UpSampling2D, \
+   # ZeroPadding2D, GlobalAveragePooling2D,
+from keras.callbacks import EarlyStopping, TensorBoard,ReduceLROnPlateau
+from keras.optimizers import RMSprop, Adam, SGD,Nadam,Adamax
+from keras.utils import plot_model
+#import time
+from keras import backend as K
+#from dataPrepocessing import *
+from keras.applications.inception_v3 import *
+import tensorflow as tf
+from scipy import stats
+import matplotlib.pyplot as plt
+from scipy.misc import doccer
+from scipy._lib._version import NumpyVersion
+from scipy.ndimage import filters
+from keras.layers.advanced_activations import LeakyReLU
+import itertools
+from sklearn.cross_validation import train_test_split
+#from keras.optimizers import RMSprop, Adam, SGD,Nadam
+#import numpy as np
+from sklearn.utils import shuffle  
+import random
+
+#import itertools
+#from new_models import *
+#import os
+import time
+import sys
+sys.path.append('/opt/Data/ChenXY/Parallel_net_huawei')
+from parallel_model import *
+from Res_net_Huawei  import *
+from Dense_net_Huawei  import*
+from Inception_models import *
+
+os.environ["CUDA_VISIBLE_DEVICES"] = "0,1,2"
+
+
+modelPath = '/opt/Data/ChenXY/Parallel_net_huawei/Model/'
+#dataPath = '/media/pami/Seagate Expansion Drive/CXY/' #if local else 'bla'
+dataPath='/opt/Data/ChenXY/'
+print(modelPath)
+#figPath = 'D:\\s00418714\\13-RSRP\\02-figure'
+
+def minmaxScaleImage(x):
+    for i in range(x.shape[-1]-3):
+        x[:, :, :, i] = 2*((x[:, :, :, i] - np.min(x[:, :, :, i]))/(np.max(x[:, :, :, i]) - np.min(x[:, :, :, i])))-1
+    #     scale to [-1,1]i
+#    for i in range(x.shape[-1]-2,x.shape[-1]):
+    x[:, :, :, 7] = 0.1*x[:, :, :, 7]
+    x[:, :, :, 8] = 0.001*x[:, :, :, 8]
+
+#    #     sca
+    return x
+
+#
+#def load_data(scale=True, precison='20m'):
+#    x = np.load(os.path.join(dataPath, 'array_result_map.npy'))#augmentMaps_norm.npy
+#    #x=x[:,:,:,[0,1,2,3,4,5]]#input only use 6 channels
+#    y = np.load(os.path.join(dataPath, 'array_result_cleaned_mr.npy'))#augmentMRs_norm.npy
+#    x = np.nan_to_num(x)
+#    y = np.nan_to_num(y)
+#    x = minmaxScaleImage(x)
+#    return x, y
+##
+def load_data(scale=True, precison='20m'):
+    data=np.load(os.path.join(dataPath, 'concatented_simulation_data.npz'))
+    x = np.float16(data['X_input'])#augmentMaps_norm.npy
+    x=x.swapaxes(3,1).swapaxes(1, 2)
+    #x=x[:,:,:,[0,1,2,3,4,5]]#input only use 6 channels
+    y = np.float64(data['Y_input'])#augmentMRs_norm.npy
+    y=y[:,:,:,np.newaxis]
+    x = np.nan_to_num(x)
+    y = np.nan_to_num(y)
+    x = minmaxScaleImage(x)
+    test_5 = np.array(data['City_num'])#augmentMRs_norm.npy
+    city=data['City_list']
+    return x, y,test_5,city
+
+#8DB percentage
+def abs_error_pct(y, y_pre, p):
+    abs_error = np.ravel(abs((y-y_pre)))
+    abs_error_flatten = abs_error[np.ravel(y) != 0]
+    return [100 * len(abs_error_flatten[abs_error_flatten <= i])/len(abs_error_flatten) for i in p]
+
+#RMSE
+def my_loss_array(y_true, y_pred):
+    mask = np.sign(y_true)
+    a = 0
+    for i in range(len(mask)):
+        a = a + np.sum(mask[i])
+    return np.sqrt(np.sum(np.square(y_pred - y_true) * mask, axis=None) /a)
+
+def my_loss_mse(y_true, y_pred):
+    mask = K.sign(y_true)
+    return K.sqrt(K.sum(K.square(y_pred - y_true) * mask, axis=None) / K.sum(mask, axis=None))
+
+def my_loss_array_averror(y_true, y_pred):
+    mask = np.sign(y_true)
+    a = 0
+    for i in range(len(mask)):
+        a = a + np.sum(mask[i])
+    return np.sum((y_pred - y_true) * mask, axis=None) / a
+
+
+
+def my_loss_array_absaverror(y_true, y_pred):
+    mask = np.sign(y_true)
+    a = 0
+    for i in range(len(mask)):
+        a = a + np.sum(mask[i])
+    return np.sum(np.abs(y_pred - y_true) * mask, axis=None) / a
+
+
+def my_loss_abs_error_pct(y_true, y_pred):
+    mask = K.sign(y_true)
+    abs_error = K.abs(y_true-y_pred) * mask
+    # print(abs_error)
+    # print(K.int_shape(abs_error))
+    # aa = K.constant(7.99, shape=K.int_shape(abs_error))
+    abs_error_largerthan8db = K.sum(K.sign(abs_error - 7.99) + 1, axis=None)/2
+    return abs_error_largerthan8db / K.sum(mask, axis=None)
+
+
+def test():
+    x, y ,test_5,city= load_data(True, precison='20m')
+
+
+
+#    x1, y1 = load_data(True, precison='20m')
+
+    # x = np.delete(x, [0, x.shape[1] - 1], axis=1)
+    # x = np.delete(x, [0, x.shape[2] - 1], axis=2)
+    # x_train_1, x_test_1, y_train_1, y_test_1 = train_test_split(x, y, test_size=0.1, random_state=1234)
+#    city = ["Fuzhou", "Hangzhou", "Ningbo", "Beijing", "Shijiazhuang", "shanghai_UMTS", "Shanghai_LTEFDD", "Malaysia","Argentina","Foshan", "Zhongshan", "Hefei", "Linfen","City_a","City_b","City_c","City_d"]
+    # rsrp+ 9 inputs+50*50
+    # test_5 = np.array([0,1014,3096,3449,4034,4444,5485,5607,6619,7034,7157,7603,7851,8047,8201,8439,9352,9817])
+    # rsrp+ 9 inputs+100*100
+    # test_5 = np.array([0, 1051,3256,3554,4126,4548,5665,5790,6821,7238,7361,7916,8147,8394,8572,8812,9976,10483])
+#    test_5 = np.array([0,1051,3256,3554,4126,4548,5665,5790,6821,7238,7361,7916,8147,8394,8572,8812,9976,10483])
+    
+#    test_5 = np.array([0,1051,3256,3554,4126,4548,5665,5790,6821,7238,7361,7916,8147,8394,8572,8812,9976,10483])
+    
+
+    #test_5 =test_5*12
+    for i in range(len(test_5)-1):
+        x_test_1=x[test_5[i]:test_5[i + 1]]
+        y_test_1=y[test_5[i]:test_5[i + 1]]
+        x_train_1=np.delete(x, np.arange(test_5[i], test_5[i + 1],1), axis=0)
+        y_train_1 = np.delete(y, np.arange(test_5[i], test_5[i + 1],1), axis=0)
+        # x_train_1, y_train_1=x,y
+        # shuffle training set
+        index = [j for j in range(len(x_train_1))]
+        random.shuffle(index)
+        x_train_1 = x_train_1[index]
+        y_train_1 = y_train_1[index]
+
+#        x_train_1, y_train_1 = data_aug(x_train_1, y_train_1)
+    #itertools.chain
+        # -------------------------------------------------------------
+        
+        learning_rate=1
+        patientce =40
+        epochs = 50
+        
+        depth=25  #changeable  (depth-4)/3=int
+        nb_dense_block=2#Number of dense blocks
+        nb_filter=8
+        dropout_rate=0.2
+        growth_rate=8
+        weight_decay=1E-4
+        activation = 'relu'  # ['relu', 'tanh']
+        batch_size =32
+        patience =40
+        num_outputs=784#2500#
+        repetitions=[3, 7, 9,11]#res_net repetitions: Number of repetitions of various block units.
+               # At each block unit, the number of filters are doubled and the input size is halved
+
+        nfilter = [8, 16, 32, 64]#Huawei net  filter size
+        x_train, x_test, y_train, y_test = x_train_1, x_test_1, y_train_1, y_test_1
+        
+        x_para_train=x_train[:,0,0,[6,7,8]]
+        x_train_channel1=x_train[:,:,:,[0,3,4,5]]
+        x_train_channel2=x_train[:,:,:,[1,3,4,5]]
+        x_train_channel3=x_train[:,:,:,[2,3,4,5]]
+#        print("x_train_channel1.shape():",np.shape(x_train_channel1))
+        img_dim = x_train_channel2.shape[1:]#x_train_main.shape[1:]
+#        x_para_test=x_test[:,0,0,[6,7,8]]
+#        x_test=x_test[:,:,:,[0,1,2,3,4,5]]
+        logFilePath = os.path.join(modelPath, 'rscp_2_layer_inceptionv3_17city_100_100_9feature' + str(20171128) + '.txt')
+        model_opt_idx = np.int64(time.strftime('%Y%m%d%H%M%S', time.localtime(time.time())))
+
+#        model, hist = InceptionV3_2layer_100(model_opt_idx=model_opt_idx, x_train=x_train, y_train=y_train,
+#                                 batch_size=batch_size,
+#                                 activation=activation, optType=optType, lr=lr, nfilter=nfilter,
+#                                 kernel_size=kernel_size,
+#                                 myloss=my_loss_mse, epochs=epochs, patience=patientce)
+        model=Parallel_net(input_shape=img_dim,num_outputs=num_outputs,depth=depth,
+                                          nb_dense_block=nb_dense_block, growth_rate=growth_rate,
+                                          nb_filter=nb_filter, dropout_rate=dropout_rate, 
+                                          weight_decay=weight_decay, block_fn=bottleneck, 
+                                          repetitions=repetitions,activation=activation, 
+                                          nfilter=nfilter,modelPath=modelPath)
+    # Model output
+        model.summary()
+        opt =Adamax(lr=learning_rate, beta_1=0.9, beta_2=0.999, epsilon=1e-08)# SGD(lr=0.01, momentum=0.0, decay=0.0, nesterov=False)#
+
+     
+        model.compile(loss=my_loss_mse, optimizer=opt,
+                      metrics=[my_loss_abs_error_pct, 'mean_squared_error', 'mean_absolute_error', 'mean_absolute_percentage_error'])
+        early_stop = EarlyStopping(monitor="val_loss", patience=patience,verbose=0, mode='auto')
+        tensorboard = TensorBoard(log_dir=os.path.join(modelPath, 'log' + str(model_opt_idx) + '.h5'), histogram_freq=0, write_graph=True, write_images=True)
+
+    #
+        model_checkpoint = keras.callbacks.ModelCheckpoint(filepath=os.path.join(modelPath, 'best' + str(model_opt_idx) + '.h5'), monitor='val_loss', verbose=1,save_best_only=True)
+        
+        hist = model.fit([x_train_channel1, x_train_channel2,x_train_channel3,x_para_train], y_train, batch_size=batch_size, epochs=epochs, validation_split=0.1, shuffle=True,
+                         callbacks=[early_stop,tensorboard,model_checkpoint])
+        
+        model.save_weights(filepath=os.path.join(modelPath, 'best' + str(model_opt_idx) + '.h5').format(epochs))
+       
+        model.save(filepath=os.path.join(modelPath, 'mode_parallel_net' + str(model_opt_idx) + '.h5'), overwrite=True)
+        x_para_test=x_test[:,0,0,[6,7,8]]
+        x_test_channel1=x_test[:,:,:,[0,3,4,5]]
+        x_test_channel2=x_test[:,:,:,[1,3,4,5]]
+        x_test_channel3=x_test[:,:,:,[2,3,4,5]]
+
+        y_test_pre = model.predict(x=[x_test_channel1,x_test_channel2,x_test_channel3,
+                                      x_para_test], batch_size=batch_size)
+        p = [8, 10, 12]
+        y_test_eval1 = abs_error_pct(y_test, y_test_pre, p)
+        y_test_eval2 = my_loss_array(y_test, y_test_pre)
+        y_test_eval3 = my_loss_array_averror(y_test, y_test_pre)
+        #figures(hist)
+
+        print('percentage of relative error (y_test) <=', p, 'is: ', y_test_eval1)
+        print("mean_squared_error \n", y_test_eval2)
+        # print(hist.history)
+        fobj = open(logFilePath, 'a')
+        fobj.write('rscp_2_layer_inceptionv3_17city_100_100_9feature' + '\n') #+add one more layer V3
+        fobj.write('model_opt_idx: ' + str(model_opt_idx) + '\n')
+        fobj.write(' city: ' + str(city[i]) + '\n')
+        fobj.write('the start number of cities: ' + str(test_5[i]) + '\n')
+        fobj.write('x_train.shape: ' + str(x_train.shape) + '\n')
+        fobj.write('y_train.shape: ' + str(y_train.shape) + '\n')
+        fobj.write('epochs: ' + str(epochs) + '\n')
+        fobj.write('patientce: ' + str(patientce) + '\n')
+        if not isinstance(activation, str):
+            activation = 'LeakyReLU'
+        #fobj.write('scaleOrnot = ' + str(scale) + ' || optType = ' + str(optType) + ' || lr = ' + str(
+           # lr) + ' || nfilter = ' + str(nfilter) + ' || kernel_size = ' + str(
+           # kernel_size) + ' || activation = ' + str(
+           # activation) + '\n')
+        fobj.write('percentage of relative error (y_test) <= ' + str(p) + 'is: ' + str(y_test_eval1) + '\n')
+        # fobj.write('mean_squared_error (y_train) = ' + str(hist.history['loss']) + '\n')
+        # fobj.write('mean_squared_error (y_val) = ' + str(hist.history['val_loss']) + '\n')
+        fobj.write("mean_squared_error (y_test) = " + str(y_test_eval2) + '\n')
+        fobj.write("mean_squared_error (y_train) = " + str(hist.history['loss'][-1]) + '\n')
+        fobj.write("average_error = " + str(y_test_eval3) + '\n')
+        fobj.write('---------------------------------------------------------------------------\n')
+        fobj.write('\n')
+        fobj.close()
+
+if __name__ == '__main__':
+    test()
