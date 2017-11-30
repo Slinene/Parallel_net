@@ -1,0 +1,86 @@
+#!/usr/bin/env python2
+# -*- coding: utf-8 -*-
+"""
+Created on Fri Nov 17 13:01:52 2017
+
+@author: pami
+"""
+
+from keras.layers.core import Reshape,Lambda
+from keras.models import Model
+from keras.layers import Input, Concatenate,concatenate
+from keras.layers.convolutional import Conv2D
+import sys
+sys.path.append('/opt/Data/ChenXY/Parallel_net_huawei')
+from Res_net_Huawei  import *
+from Dense_net_Huawei  import*
+from Inception_models import *
+from keras.utils import plot_model
+import os
+import keras.backend as K
+def Parallel_net(input_shape,num_outputs,depth, nb_dense_block, growth_rate,
+             nb_filter, dropout_rate, weight_decay,block_fn, 
+             repetitions,activation, nfilter,modelPath):
+
+    model_input_channel1=Input(shape=input_shape,name='input_channel1')
+    model_input_channel2=Input(shape=input_shape,name='input_channel2')
+    model_input_channel3=Input(shape=input_shape,name='input_channel3')
+    model_input_para=Input(shape=[3],name='input_para')
+    Dense_out=DenseNet(model_input_channel1,model_input_para,input_shape,
+                                        depth, nb_dense_block, growth_rate,
+                                        nb_filter, dropout_rate=None, weight_decay=1E-4)
+    """ Build the DenseNet model
+
+    :param nb_classes: int -- number of classes
+    :param img_dim: tuple -- (channels, rows, columns)
+    :param depth: int -- how many layers
+    :param nb_dense_block: int -- number of dense blocks to add to end
+    :param growth_rate: int -- number of filters to add
+    :param nb_filter: int -- number of filters
+    :param dropout_rate: float -- dropout rate
+    :param weight_decay: float -- weight decay
+
+    :returns: keras model with nb_layers of conv_factory appended
+    :rtype: keras model
+
+    """
+    Res_out=ResnetBuilder.build(model_input_channel2,model_input_para,input_shape,
+                                num_outputs,block_fn, repetitions)
+    """Builds a custom ResNet like architecture.
+
+        Args:
+            input_shape: The input shape in the form (nb_channels, nb_rows, nb_cols)
+            num_outputs: The number of outputs at final softmax layer
+            block_fn: The block function to use. This is either `basic_block` or `bottleneck`.
+                The original paper used basic_block for layers < 50
+            repetitions: Number of repetitions of various block units.
+                At each block unit, the number of filters are doubled and the input size is halved
+                """
+
+    Inception_out=InceptionV3_2layer_100(model_input_channel3,model_input_para, num_outputs,activation, nfilter)
+    
+#    print("Dense_out shape:",K.shape(Dense_out))
+#    print("Res_out shape:",K.shape(Res_out))
+#    print("Inception_out shape:",K.shape(Inception_out))
+    Output=concatenate([Dense_out,Res_out,Inception_out],axis=-1)
+#    Output=Reshape(56,56,3)(Output)
+#    print("Output shape:",K.shape(Output))
+    x=Conv2D(1,(1,1),activation='linear',padding='same')(Output)#1*1conv_kernel to add weight to different output
+#    x=Reshape((56,56,1))(x)
+#    def trans(x):
+#        x=K.reshape(x,[56,56,1])
+#    my_layer=Lambda(trans,output_shape=[56,56,1])
+#    x=my_layer(x)
+    model=Model(inputs=[model_input_channel1,model_input_channel2,model_input_channel3, model_input_para],
+                outputs=[x],name='parallel_net')
+    plot_model(model, show_shapes=True, to_file=os.path.join(modelPath, "model_10m.png"))
+    return model
+        
+    
+    
+
+
+
+
+
+
